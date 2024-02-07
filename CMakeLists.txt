@@ -79,6 +79,7 @@ add_caliper_option(WITH_VARIORUM  "Enable Variorum support" FALSE)
 add_caliper_option(WITH_UMPIRE    "Enable Umpire statistics support" FALSE)
 add_caliper_option(WITH_CRAYPAT   "Enable CrayPAT region forwarding support" FALSE)
 add_caliper_option(WITH_LDMS      "Enable LDMS forwarder" FALSE)
+add_caliper_option(WITH_SOMA      "Enable SOMA forwarder" FALSE)
 
 add_caliper_option(USE_EXTERNAL_GOTCHA "Use pre-installed gotcha instead of building our own" FALSE)
 
@@ -473,6 +474,18 @@ if (WITH_LDMS)
    endif()
 endif()
 
+if (WITH_SOMA)
+  find_package(soma)
+  if (soma_FOUND)
+    set(CALIPER_HAVE_SOMA TRUE)
+    get_target_property(_soma_location soma-client LOCATION)
+    set(CALIPER_SOMA_CMAKE_MSG "Yes, using ${_soma_location}")
+    list(APPEND CALIPER_EXTERNAL_LIBS soma-client)
+  else()
+    message(WARNING "SOMA support was requested but SOMA was not found")
+  endif()
+endif()
+
 # PGI 17.x has issues with some constexpr constructors
 if(CMAKE_CXX_COMPILER_ID MATCHES PGI)
   set(CALIPER_REDUCED_CONSTEXPR_USAGE TRUE)
@@ -596,7 +609,8 @@ set(CALIPER_MODULES
   variorum
   umpire
   CrayPAT
-  LDMS)
+  LDMS
+  SOMA)
 
 foreach(_caliper_module ${CALIPER_MODULES})
   string(LENGTH "${_caliper_module}" _strlen)

@@ -122,6 +122,8 @@ if (CALIPER_HAVE_MPI)
   if (CALIPER_HAVE_TAU)
     add_subdirectory(tau)
   endif()
+if (CALIPER_HAVE_SOMA)
+  add_subdirectory(soma)
 endif()
 
 if (CALIPER_BUILD_TESTING)
