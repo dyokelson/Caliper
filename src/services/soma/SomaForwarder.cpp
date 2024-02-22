@@ -31,6 +31,7 @@
 
 
 #define SLURM_NOTIFY_TIMEOUT 5
+static thallium::engine *engine;
 static soma::Client *client;
 static soma::CollectorHandle soma_collector;
 static soma::NamespaceHandle *ns_handle;
@@ -65,7 +66,7 @@ void initialize_soma_collector(int my_rank)
     const char* env_soma_num_servers             = getenv("SOMA_NUM_SERVERS_PER_INSTANCE");
     const char* env_soma_server_id               = getenv("SOMA_SERVER_INSTANCE_ID");
     const char* env_soma_cali_mon_freq           = getenv("CALI_SOMA_MONITORING_FREQ");
-
+    
     /* Parse and set up the connection information */
     int num_server = 1;
     num_server = std::stoi(std::string(env_soma_num_servers));
@@ -84,9 +85,11 @@ void initialize_soma_collector(int my_rank)
     unsigned provider_id = 0;
     std::string collector = read_nth_line(std::string(env_soma_node_fpath), server_instance_id*num_server + my_server_offset);
     std::string protocol = address.substr(0, address.find(":"));
+    
+    // Initialize the thallium server
+    engine = new thallium::engine(protocol, THALLIUM_CLIENT_MODE);
 
     /* Create the soma connection handle */
-    static thallium::engine *engine;
     try {
 
         // Initialize a Client
@@ -94,8 +97,8 @@ void initialize_soma_collector(int my_rank)
 	    // Create the client handle 
         soma_collector = (*client).makeCollectorHandle(address, provider_id,
                     soma::UUID::from_string(collector.c_str()));
-	    ns_handle = soma_collector.soma_create_namespace("CALIPER");
-
+        ns_handle = soma_collector.soma_create_namespace("CALIPER");
+        std::cout << "Initialized Namespace Handle" << std::endl;
         // Set publish frequency	
         int monitoring_frequency = 1;
         if (env_soma_cali_mon_freq != NULL) { 
@@ -108,11 +111,10 @@ void initialize_soma_collector(int my_rank)
         std::cerr << ex.what() << std::endl;
         exit(-1);
     }
-    // set initialized bool?
-    // return ns_handle;
+
 }
 
-std::ostream& write_soma_record(std::ostream& os, int mpi_rank, RegionProfile& profile)
+void write_soma_record(std::ostream& os, int mpi_rank, RegionProfile& profile, Caliper* c, SnapshotView rec)
 {
 
     std::map<std::string, double> region_times;
@@ -124,31 +126,35 @@ std::ostream& write_soma_record(std::ostream& os, int mpi_rank, RegionProfile& p
     double unix_ts = 1e-6 * std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 
+    std::string timestamp = std::to_string(unix_ts);
+    std::string time_rank_key;
+    time_rank_key = timestamp + "/" + std::to_string(mpi_rank);
+
     for (const auto &p : region_times) {
         // ignore regions with < 5% of the epoch's total time
-        if (p.second < 0.05 * total_time)
-            continue;
+        // if (p.second < 0.05 * total_time)
+        //     continue;
 
-        std::string timestamp = std::to_string(unix_ts);
-        std::string time_rank_key;
-
-        // will rank be -1 if there was no MPI enabled?
-        // TODO fix so that we get the rank if it's there but if it's not there we don't need it
-        if (mpi_rank >= 0) {
-            time_rank_key = timestamp + "/" + std::to_string(mpi_rank);
-            // duration metric here? or earlier
-            // Update the namespace per region metric
-            // pretty sure p.first is path region, p.second is duration
-            soma_collector.soma_update_namespace(ns_handle, time_rank_key, p.first, p.second, soma::OVERWRITE); 
+        soma_collector.soma_update_namespace(ns_handle, time_rank_key, p.first, p.second, soma::OVERWRITE); 
+    }
+    // Get other metrics as part of the record
+    if (!rec.empty()) {
+        for (const Entry& e : rec) {
+            if (e.is_reference()) {
+                std::cout << "Debugging this type of metric? " << e.node()->id() << std::endl;
+            }
+            else {
+                std::string metric = c->get_attribute(e.attribute()).name_c_str();
+                std::string value = e.value().to_string();
+                soma_collector.soma_update_namespace(ns_handle, time_rank_key, metric, value, soma::OVERWRITE);
+            }       
         }
     }
+        
     auto response = soma_collector.soma_commit_namespace_async(ns_handle);
     if (response) {
         requests.push_back(*std::move(response));
     }
-
-    // error check
-    return os;
 
 }
 
@@ -159,14 +165,10 @@ class SomaForwarder
 
     std::string   filename;
 
-    soma::CollectorHandle soma_collector;
-
-    // can get another record here for 
-    void snapshot(Caliper* c, Channel*) {
-        Entry e = c->get(c->get_attribute("mpi.rank"));
-        int rank = e.empty() ? -1 : e.value().to_int();
-
-        write_soma_record(*stream.stream(), rank, profile) << "\n";
+    void process_snapshot(Caliper* c, SnapshotView rec) {
+        std::cout << "Intercepted Snapshot" << std::endl;
+        
+        write_soma_record(*stream.stream(), my_rank, profile, c, rec);
 
         profile.clear(); // reset profile - skip to create a cumulative profile
     }
@@ -190,6 +192,7 @@ class SomaForwarder
         }
         // write to file at the very end
         if (my_rank == 0) {
+            std::cout << "Writing to File" << std::endl;
             std::string outfile = "caliper_data_soma.txt";
             bool write_done;
             soma_collector.soma_write(outfile, &write_done, soma::OVERWRITE);
@@ -215,10 +218,14 @@ public:
             [instance](Caliper* c, Channel* channel){
                 instance->post_init(c, channel);
             });
-        channel->events().snapshot.connect(
-            [instance](Caliper* c, Channel* channel, SnapshotView, SnapshotBuilder&){
-                instance->snapshot(c, channel);
-            });
+        /* channel->events().snapshot.connect(
+             [instance](Caliper* c, Channel* channel, SnapshotView, SnapshotBuilder&){
+                 instance->snapshot(c, channel);
+             }); */
+        channel->events().process_snapshot.connect(
+             [instance](Caliper* c, Channel* channel, SnapshotView, SnapshotView record){
+                 instance->process_snapshot(c, record);
+             });
         channel->events().finish_evt.connect(
             [instance](Caliper* c, Channel* chn){
                 instance->finalize();
