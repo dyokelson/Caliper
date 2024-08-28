@@ -128,7 +128,7 @@ void write_soma_record(std::ostream& os, int mpi_rank, RegionProfile& profile, C
 
     std::string timestamp = std::to_string(unix_ts);
     std::string time_rank_key;
-    time_rank_key = timestamp + "/" + std::to_string(mpi_rank);
+    time_rank_key = std::to_string(mpi_rank) + "/" + timestamp;
 
     for (const auto &p : region_times) {
         // ignore regions with < 5% of the epoch's total time
